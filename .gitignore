@@ -1,0 +1,7 @@
+.env
+.venv
+llm_logs/
+training_logs/
+inference_logs/
+games/
+**__pycache__**
