@@ -4,6 +4,7 @@ Provides agent implementations including:
 - RandomAgent: Baseline random action selection
 - REINFORCEAgent: Policy gradient agent
 - A2CAgent: Actor-Critic agent with N-step updates
+- PPOAgent: Proximal Policy Optimization agent (recommended)
 """
 
 import os
@@ -145,7 +146,9 @@ class PolicyNetwork(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, action_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc5 = nn.Linear(hidden_dim, action_dim)
 
     def forward(self, x):
         """Forward pass through the network.
@@ -158,7 +161,10 @@ class PolicyNetwork(nn.Module):
         """
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = F.relu(self.fc3(x))
+        x = F.relu(self.fc4(x))
+                
+        return self.fc5(x)
 
 
 class ValueNetwork(nn.Module):
@@ -174,7 +180,9 @@ class ValueNetwork(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 1)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc5 = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
         """Forward pass through the network.
@@ -187,7 +195,10 @@ class ValueNetwork(nn.Module):
         """
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = F.relu(self.fc3(x))
+        x = F.relu(self.fc4(x))
+                
+        return self.fc5(x)
 
 
 class REINFORCEAgent(BaseAgent):
@@ -584,3 +595,328 @@ class A2CAgent(BaseAgent):
             self.critic_optimizer.load_state_dict(
                 checkpoint["critic_optimizer_state_dict"]
             )
+
+
+class PPOAgent(BaseAgent):
+    """Proximal Policy Optimization (PPO) agent.
+
+    Uses clipped surrogate objective for stable policy updates with
+    multiple epochs of minibatch updates on collected experience.
+    """
+
+    def __init__(
+        self,
+        state_dim=OBSERVATION_DIM,
+        action_dim=NUM_ACTIONS,
+        hidden_dim=128,
+        lr=3e-4,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_epsilon=0.2,
+        entropy_coef=0.01,
+        value_coef=0.5,
+        max_grad_norm=0.5,
+        n_steps=128,
+        n_epochs=4,
+        batch_size=32,
+    ):
+        """Initialize PPO agent.
+
+        Args:
+            state_dim: Dimension of state/observation space.
+            action_dim: Number of actions.
+            hidden_dim: Size of hidden layers.
+            lr: Learning rate.
+            gamma: Discount factor.
+            gae_lambda: Lambda for GAE (Generalized Advantage Estimation).
+            clip_epsilon: Clipping parameter for PPO objective.
+            entropy_coef: Entropy bonus coefficient.
+            value_coef: Value loss coefficient.
+            max_grad_norm: Maximum gradient norm for clipping.
+            n_steps: Number of steps to collect before update.
+            n_epochs: Number of epochs for each update.
+            batch_size: Minibatch size for updates.
+        """
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.gamma = gamma
+        self.gae_lambda = gae_lambda
+        self.clip_epsilon = clip_epsilon
+        self.entropy_coef = entropy_coef
+        self.value_coef = value_coef
+        self.max_grad_norm = max_grad_norm
+        self.n_steps = n_steps
+        self.n_epochs = n_epochs
+        self.batch_size = batch_size
+
+        self.actor = PolicyNetwork(state_dim, action_dim, hidden_dim).to(self.device)
+        self.critic = ValueNetwork(state_dim, hidden_dim).to(self.device)
+
+        self.optimizer = optim.Adam(
+            list(self.actor.parameters()) + list(self.critic.parameters()), lr=lr
+        )
+
+        # Rollout buffers
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.log_probs = []
+        self.dones = []
+
+        self.accumulated_loss = 0.0
+        self.update_count = 0
+
+    def select_action(self, state, return_probs=False):
+        """Select action using the actor network.
+
+        Args:
+            state: Current observation.
+            return_probs: Whether to return action probabilities.
+
+        Returns:
+            action: Selected action index.
+            probs: Action probabilities (if return_probs=True).
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            logits = self.actor(state_tensor)
+            probs = F.softmax(logits, dim=-1)
+            value = self.critic(state_tensor)
+
+        dist = Categorical(probs)
+        action = dist.sample()
+        log_prob = dist.log_prob(action)
+        action_idx = action.item()
+
+        # Store experience
+        self.states.append(state)
+        self.actions.append(action_idx)
+        self.values.append(value.item())
+        self.log_probs.append(log_prob.item())
+
+        probs_np = probs.cpu().numpy().flatten()
+
+        if return_probs:
+            return action_idx, probs_np
+        return action_idx
+
+    def store_reward(self, reward, done=False):
+        """Store reward and done flag, trigger update if buffer full.
+
+        Args:
+            reward: Reward received.
+            done: Whether episode ended.
+        """
+        self.rewards.append(reward)
+        self.dones.append(done)
+
+        # Perform PPO update when buffer is full
+        if len(self.rewards) >= self.n_steps:
+            loss = self._update_ppo()
+            if loss is not None:
+                self.accumulated_loss += loss
+                self.update_count += 1
+
+    def _compute_gae(self, rewards, values, dones, next_value):
+        """Compute Generalized Advantage Estimation.
+
+        Args:
+            rewards: List of rewards.
+            values: List of value estimates.
+            dones: List of done flags.
+            next_value: Bootstrap value for last state.
+
+        Returns:
+            advantages: Tensor of advantages.
+            returns: Tensor of returns.
+        """
+        advantages = []
+        gae = 0
+
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_val = next_value
+            else:
+                next_val = values[t + 1]
+
+            # If done, no bootstrapping
+            mask = 1.0 - float(dones[t])
+            delta = rewards[t] + self.gamma * next_val * mask - values[t]
+            gae = delta + self.gamma * self.gae_lambda * mask * gae
+            advantages.insert(0, gae)
+
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(self.device)
+        returns = advantages + torch.tensor(values, dtype=torch.float32).to(self.device)
+
+        return advantages, returns
+
+    def _update_ppo(self):
+        """Perform PPO update with multiple epochs.
+
+        Returns:
+            Average loss over all updates.
+        """
+        if len(self.rewards) == 0:
+            return None
+
+        # Get next value for GAE bootstrap
+        if len(self.states) > len(self.rewards):
+            next_state = torch.FloatTensor(self.states[-1]).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                next_value = self.critic(next_state).item()
+        else:
+            next_value = 0
+
+        # Use only the data we have rewards for
+        n = len(self.rewards)
+        states = self.states[:n]
+        actions = self.actions[:n]
+        old_log_probs = self.log_probs[:n]
+        values = self.values[:n]
+        rewards = self.rewards
+        dones = self.dones
+
+        # Compute GAE
+        advantages, returns = self._compute_gae(rewards, values, dones, next_value)
+
+        # Normalize advantages
+        if len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Convert to tensors
+        states_tensor = torch.FloatTensor(np.array(states)).to(self.device)
+        actions_tensor = torch.LongTensor(actions).to(self.device)
+        old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(self.device)
+
+        # PPO update with multiple epochs
+        total_loss = 0.0
+        num_updates = 0
+        n_samples = len(states)
+
+        for _ in range(self.n_epochs):
+            # Generate random permutation for minibatches
+            indices = np.random.permutation(n_samples)
+
+            for start in range(0, n_samples, self.batch_size):
+                end = min(start + self.batch_size, n_samples)
+                batch_indices = indices[start:end]
+
+                # Get batch data
+                batch_states = states_tensor[batch_indices]
+                batch_actions = actions_tensor[batch_indices]
+                batch_old_log_probs = old_log_probs_tensor[batch_indices]
+                batch_advantages = advantages[batch_indices]
+                batch_returns = returns[batch_indices]
+
+                # Forward pass
+                logits = self.actor(batch_states)
+                probs = F.softmax(logits, dim=-1)
+                dist = Categorical(probs)
+
+                new_log_probs = dist.log_prob(batch_actions)
+                entropy = dist.entropy().mean()
+                new_values = self.critic(batch_states).squeeze()
+
+                # PPO clipped objective
+                ratio = torch.exp(new_log_probs - batch_old_log_probs)
+                surr1 = ratio * batch_advantages
+                surr2 = (
+                    torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon)
+                    * batch_advantages
+                )
+                actor_loss = -torch.min(surr1, surr2).mean()
+
+                # Value loss (clipped or simple MSE)
+                value_loss = F.mse_loss(new_values, batch_returns)
+
+                # Total loss
+                loss = (
+                    actor_loss
+                    + self.value_coef * value_loss
+                    - self.entropy_coef * entropy
+                )
+
+                # Update
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.actor.parameters()) + list(self.critic.parameters()),
+                    self.max_grad_norm,
+                )
+                self.optimizer.step()
+
+                total_loss += loss.item()
+                num_updates += 1
+
+        # Clear processed experience
+        self.states = self.states[n:]
+        self.actions = self.actions[n:]
+        self.values = self.values[n:]
+        self.log_probs = self.log_probs[n:]
+        self.rewards = []
+        self.dones = []
+
+        return total_loss / num_updates if num_updates > 0 else 0.0
+
+    def update_policy(self):
+        """Final update at end of episode for remaining steps.
+
+        Returns:
+            Average loss over all updates this episode.
+        """
+        # Update any remaining steps
+        if len(self.rewards) > 0:
+            loss = self._update_ppo()
+            if loss is not None:
+                self.accumulated_loss += loss
+                self.update_count += 1
+
+        # Return average loss
+        avg_loss = (
+            self.accumulated_loss / self.update_count if self.update_count > 0 else 0.0
+        )
+
+        # Reset for next episode
+        self.clear_buffer()
+        self.accumulated_loss = 0.0
+        self.update_count = 0
+
+        return avg_loss
+
+    def clear_buffer(self):
+        """Clear all rollout buffers."""
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.values = []
+        self.log_probs = []
+        self.dones = []
+
+    def save_model(self, path):
+        """Save model weights.
+
+        Args:
+            path: File path to save model.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(
+            {
+                "actor_state_dict": self.actor.state_dict(),
+                "critic_state_dict": self.critic.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+            },
+            path,
+        )
+
+    def load_model(self, path):
+        """Load model weights.
+
+        Args:
+            path: File path to load model from.
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

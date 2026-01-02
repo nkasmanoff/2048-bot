@@ -5,11 +5,14 @@ Usage:
     # Play with random agent (baseline)
     python play.py --agent random --games 5
 
-    # Play with REINFORCE model
-    python play.py --agent reinforce --model models/best_model_2048.pt --games 5
+    # Play with PPO model (recommended)
+    python play.py --agent ppo --model models/best_model_2048.pt --games 5
 
     # Play with A2C model
     python play.py --agent a2c --model models/best_model_2048.pt --games 5
+
+    # Play with REINFORCE model
+    python play.py --agent reinforce --model models/best_model_2048.pt --games 5
 
     # Play with LLM agent (requires .env file with API key and model config)
     python play.py --agent llm --games 3
@@ -22,7 +25,7 @@ import argparse
 
 from dotenv import load_dotenv
 
-from src.agents import A2CAgent, RandomAgent, REINFORCEAgent
+from src.agents import A2CAgent, PPOAgent, RandomAgent, REINFORCEAgent
 from src.llm_agent import create_llm_agent
 from src.environment import load_and_play
 
@@ -36,7 +39,7 @@ def main():
         "--agent",
         type=str,
         default="random",
-        choices=["random", "reinforce", "a2c", "llm"],
+        choices=["random", "reinforce", "a2c", "ppo", "llm"],
         help="Agent type to use (default: random)",
     )
     parser.add_argument(
@@ -74,6 +77,9 @@ def main():
     elif args.agent == "a2c":
         agent = A2CAgent()
         print("Using A2C Agent")
+    elif args.agent == "ppo":
+        agent = PPOAgent()
+        print("Using PPO Agent")
     elif args.agent == "llm":
         agent = create_llm_agent(verbose=True)
         print("Using LLM Agent")

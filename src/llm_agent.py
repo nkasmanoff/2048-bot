@@ -100,24 +100,30 @@ Game Rules:
 - When tiles with the same number touch, they merge into their sum
 - After each move, a new tile (2 or 4) appears in an empty spot
 - The game ends when no valid moves remain
-- You can merge tiles when they are the same number and are adjacent to each other
+- Each tile can only merge once per move (e.g., [2,2,2,2] becomes [4,4,0,0], not [8,0,0])
+- Empty cells are represented as 0 in the board matrix
 
 Strategy Tips:
-- Keep high-value tiles in one corner (usually a corner)
-- Try to maintain tiles in descending order
-- Avoid moves that break your tile organization
-- Consider both immediate gains and future board state
+- Keep your highest-value tile anchored in one corner (preferably bottom-left or bottom-right)
+- Build a descending chain along the edge from that corner (e.g., 512 → 256 → 128 → 64)
+- Prioritize two directions that push tiles toward your chosen corner
+- Avoid moves that would displace your highest tile from its corner
+- Keep the anchor row full to prevent the highest tile from sliding away
+- Consider both immediate merge opportunities and future board state
 
 Your Response Format:
 You must respond with your reasoning wrapped in <thinking> tags, followed by your chosen action in <action> tags.
 
 Example:
 <thinking>
-The board has high tiles in the top-left corner. I should move left to keep them together and create merge opportunities. Moving down would scatter the tiles.
+The highest tile (256) is in the bottom-left corner with a descending chain along the bottom row. Moving down will merge the two 32 tiles in the left column while keeping the 256 anchored. Moving right would risk displacing the corner tile.
 </thinking>
-<action>Left</action>
+<action>Down</action>
 
 Available actions: Up, Right, Down, Left
+
+Current Board State:
+{board}
 
 Now, analyze the board state and choose your next move."""
 

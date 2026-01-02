@@ -210,6 +210,7 @@ def train_agent(
     record_video=False,
     action_delay=0.15,
     max_steps_per_episode=2000,
+    use_wandb=False,
 ):
     """Train an RL agent on 2048.
 
@@ -219,10 +220,18 @@ def train_agent(
         record_video: Whether to record gameplay video.
         action_delay: Delay between actions.
         max_steps_per_episode: Maximum steps before ending episode.
+        use_wandb: Whether to log metrics to Weights & Biases.
 
     Returns:
         Training metrics dictionary.
     """
+    # Import wandb only if needed
+    if use_wandb:
+        try:
+            import wandb
+        except ImportError:
+            print("Warning: wandb not installed. Disabling wandb logging.")
+            use_wandb = False
     driver, env = setup_browser_and_game(
         record_video=record_video, action_delay=action_delay
     )
@@ -300,6 +309,21 @@ def train_agent(
             f"Invalid Moves: {info['invalid_moves']} | "
             f"Loss: {(loss if loss else 0):.4f}"
         )
+
+        # Log to wandb
+        if use_wandb:
+            wandb.log({
+                "episode": episode + 1,
+                "score": final_score,
+                "max_tile": max_tile,
+                "steps": episode_step,
+                "invalid_moves": info["invalid_moves"],
+                "loss": loss if loss else 0.0,
+                "episode_reward": episode_reward,
+                "best_score": best_score,
+                "best_max_tile": best_max_tile,
+                "avg_score_last_10": sum(episode_scores[-10:]) / min(10, len(episode_scores)),
+            })
 
         # Save best model
         if final_score > best_score:

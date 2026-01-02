@@ -4,12 +4,17 @@ Contains shared helper functions for browser setup, game interaction,
 and observation extraction used across multiple modules.
 """
 
+import os
 import time
 
 import numpy as np
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+
+# Environment configuration
+IS_RASPBERRY_PI = os.environ.get("GAME_RASPBERRY_PI", "false").lower() == "true"
 
 # Observation dimensions:
 # 16 tile values (4x4 grid, log2 normalized) +
@@ -41,13 +46,27 @@ def setup_browser(headless: bool = False) -> webdriver.Chrome:
     Returns:
         Configured Chrome WebDriver instance.
     """
-    options = Options()
-    if headless:
-        options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-gpu")
+    if IS_RASPBERRY_PI:
+        # Set display for SSH sessions to use the Pi's local display
+        os.environ["DISPLAY"] = ":0"
+        options = Options()
+        options.binary_location = "/usr/bin/chromium-browser"
+        options.add_argument("--kiosk")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--force-device-scale-factor=0.5")
+        service = Service("/usr/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        options = Options()
+        if headless:
+            options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-gpu")
+        driver = webdriver.Chrome(options=options)
 
-    driver = webdriver.Chrome(options=options)
     driver.get("https://2048.io/")
     print("Waiting for game to load...")
     time.sleep(3)
